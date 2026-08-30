@@ -446,6 +446,269 @@ func TestUpdate_LiveValueMsg_Error_KeepsCachedValueButClearsPending(t *testing.T
 	}
 }
 
+func rawScreenModelWithTwoFeatures() Model {
+	m := New()
+	m.screen = screenRaw
+	m.caps = &ddc.Capabilities{Features: []ddc.VCPFeature{
+		{Code: 0x10, Name: "Brightness", Recognized: true},
+		{Code: 0x4D, Name: "Unrecognized feature", Recognized: false},
+	}}
+	m.rawReady = true
+	return m
+}
+
+func TestUpdate_RawScreen_DownMovesCursorAndWraps(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+
+	next, _ := m.Update(keyMsg("j"))
+	got := next.(Model)
+	if got.rawCursor != 1 {
+		t.Fatalf("rawCursor = %d, want 1", got.rawCursor)
+	}
+
+	next, _ = got.Update(keyMsg("j"))
+	got = next.(Model)
+	if got.rawCursor != 0 {
+		t.Errorf("rawCursor = %d, want wrap to 0", got.rawCursor)
+	}
+}
+
+func TestUpdate_RawScreen_UpWrapsToLast(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+
+	next, _ := m.Update(keyMsg("k"))
+	got := next.(Model)
+	if got.rawCursor != 1 {
+		t.Errorf("rawCursor = %d, want wrap to last (1)", got.rawCursor)
+	}
+}
+
+func TestUpdate_RawScreen_EKeyEntersEditMode(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+
+	next, cmd := m.Update(keyMsg("e"))
+	got := next.(Model)
+
+	if !got.rawEditing {
+		t.Fatal("expected rawEditing=true after pressing 'e'")
+	}
+	if cmd != nil {
+		t.Error("entering edit mode should not itself issue a command")
+	}
+}
+
+func TestUpdate_RawEditing_DigitsAppendToInput(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+	m.rawEditing = true
+
+	next, _ := m.Update(keyMsg("7"))
+	got := next.(Model)
+	next, _ = got.Update(keyMsg("5"))
+	got = next.(Model)
+
+	if got.rawEditInput != "75" {
+		t.Errorf("rawEditInput = %q, want %q", got.rawEditInput, "75")
+	}
+}
+
+func TestUpdate_RawEditing_NonDigitsAreIgnored(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+	m.rawEditing = true
+
+	next, _ := m.Update(keyMsg("x"))
+	got := next.(Model)
+
+	if got.rawEditInput != "" {
+		t.Errorf("rawEditInput = %q, want empty (non-digit ignored)", got.rawEditInput)
+	}
+}
+
+func TestUpdate_RawEditing_BackspaceDeletesLastDigit(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+	m.rawEditing = true
+	m.rawEditInput = "12"
+
+	next, _ := m.Update(keyMsg("backspace"))
+	got := next.(Model)
+
+	if got.rawEditInput != "1" {
+		t.Errorf("rawEditInput = %q, want %q", got.rawEditInput, "1")
+	}
+}
+
+func TestUpdate_RawEditing_EscCancels(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+	m.rawEditing = true
+	m.rawEditInput = "42"
+
+	next, _ := m.Update(keyMsg("esc"))
+	got := next.(Model)
+
+	if got.rawEditing {
+		t.Error("expected rawEditing=false after esc")
+	}
+	if got.rawEditInput != "" {
+		t.Errorf("expected rawEditInput cleared on cancel, got %q", got.rawEditInput)
+	}
+}
+
+func TestUpdate_RawEditing_EnterWithValidValue_MovesToConfirming(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+	m.rawEditing = true
+	m.rawEditInput = "42"
+
+	next, cmd := m.Update(keyMsg("enter"))
+	got := next.(Model)
+
+	if got.rawEditing {
+		t.Error("expected rawEditing=false once a valid value is entered")
+	}
+	if !got.rawConfirming {
+		t.Fatal("expected rawConfirming=true after a valid value")
+	}
+	if got.rawConfirmValue != 42 {
+		t.Errorf("rawConfirmValue = %d, want 42", got.rawConfirmValue)
+	}
+	if cmd != nil {
+		t.Error("moving to the confirmation prompt should not itself issue a command")
+	}
+}
+
+func TestUpdate_RawEditing_EnterWithEmptyInput_SetsError(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+	m.rawEditing = true
+
+	next, _ := m.Update(keyMsg("enter"))
+	got := next.(Model)
+
+	if !got.rawEditing {
+		t.Error("expected to remain in edit mode after an invalid value")
+	}
+	if got.rawEditErr == "" {
+		t.Error("expected rawEditErr to be set for empty input")
+	}
+}
+
+func TestUpdate_RawEditing_EnterWithOutOfRangeValue_SetsError(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+	m.rawEditing = true
+	m.rawEditInput = "999999"
+
+	next, _ := m.Update(keyMsg("enter"))
+	got := next.(Model)
+
+	if got.rawConfirming {
+		t.Error("expected an out-of-range value to be rejected, not sent to confirmation")
+	}
+	if got.rawEditErr == "" {
+		t.Error("expected rawEditErr to be set for an out-of-range value")
+	}
+}
+
+func TestUpdate_RawConfirming_YIssuesRawSetCmd(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+	m.rawCursor = 0 // recognized code 0x10
+	m.rawConfirming = true
+	m.rawConfirmValue = 50
+
+	next, cmd := m.Update(keyMsg("y"))
+	got := next.(Model)
+
+	if got.rawConfirming {
+		t.Error("expected rawConfirming=false after answering y")
+	}
+	if !got.rawWriting {
+		t.Error("expected rawWriting=true while the write is in flight")
+	}
+	if cmd == nil {
+		t.Fatal("expected a rawSetCmd to be returned after confirming")
+	}
+}
+
+func TestUpdate_RawConfirming_NCancelsWithoutIssuingCmd(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+	m.rawConfirming = true
+	m.rawConfirmValue = 50
+
+	next, cmd := m.Update(keyMsg("n"))
+	got := next.(Model)
+
+	if got.rawConfirming {
+		t.Error("expected rawConfirming=false after answering n")
+	}
+	if cmd != nil {
+		t.Error("cancelling must not issue a command")
+	}
+}
+
+func TestUpdate_RawConfirming_OtherKeysAreSwallowed(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+	m.rawConfirming = true
+	m.rawConfirmValue = 50
+
+	next, cmd := m.Update(keyMsg("j"))
+	got := next.(Model)
+
+	if !got.rawConfirming {
+		t.Error("confirmation should remain open for an unrelated key")
+	}
+	if cmd != nil {
+		t.Error("an unrelated key must not issue a command while raw-confirming")
+	}
+}
+
+func TestUpdate_RawSetMsg_Success_ClearsWritingAndTriggersRefresh(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+	m.rawWriting = true
+
+	next, cmd := m.Update(rawSetMsg{code: 0x10, err: nil})
+	got := next.(Model)
+
+	if got.rawWriting {
+		t.Error("expected rawWriting=false after rawSetMsg")
+	}
+	if got.rawWriteErr != nil {
+		t.Errorf("expected rawWriteErr=nil on success, got %v", got.rawWriteErr)
+	}
+	if cmd == nil {
+		t.Fatal("expected a follow-up single-code probe to refresh the row after a successful write")
+	}
+}
+
+func TestUpdate_RawSetMsg_Failure_SurfacesError(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+	m.rawWriting = true
+	wantErr := errors.New("ddcutil setvcp 10 50: exit status 1: Verification failed")
+
+	next, _ := m.Update(rawSetMsg{code: 0x10, err: wantErr})
+	got := next.(Model)
+
+	if got.rawWriting {
+		t.Error("expected rawWriting=false after a failed rawSetMsg")
+	}
+	if got.rawWriteErr == nil {
+		t.Error("expected rawWriteErr to be set after a failed write")
+	}
+}
+
+func TestUpdate_RawSingleProbeMsg_UpdatesReading(t *testing.T) {
+	m := rawScreenModelWithTwoFeatures()
+
+	next, _ := m.Update(rawSingleProbeMsg{
+		code:    0x10,
+		reading: ddc.FeatureReading{Code: 0x10, Readable: true, Continuous: true, Current: 55, Max: 100},
+	})
+	got := next.(Model)
+
+	r, ok := got.rawReadings[0x10]
+	if !ok {
+		t.Fatal("expected rawReadings[0x10] to be populated")
+	}
+	if r.Current != 55 {
+		t.Errorf("rawReadings[0x10].Current = %d, want 55", r.Current)
+	}
+}
+
 func TestUpdate_ProbeMsg_FreshScanHasNoPending(t *testing.T) {
 	m := New()
 	m.pending = map[uint8]bool{0x10: true} // leftover from a previous cached render, shouldn't survive

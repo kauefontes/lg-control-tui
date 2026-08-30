@@ -40,6 +40,24 @@ func TestRawValueString_NotReadableAction(t *testing.T) {
 	}
 }
 
+func TestRenderRawTable_MarksFocusedRow(t *testing.T) {
+	caps := &ddc.Capabilities{Features: []ddc.VCPFeature{
+		{Code: 0x10, Name: "Brightness", Recognized: true},
+		{Code: 0x12, Name: "Contrast", Recognized: true},
+	}}
+
+	got := renderRawTable(caps, map[uint8]ddc.FeatureReading{}, 1)
+	lines := strings.Split(got, "\n")
+
+	// Row order follows caps.Features (header takes the first two lines).
+	if strings.Contains(lines[2], "▸") {
+		t.Errorf("row 0 = %q, want no cursor marker", lines[2])
+	}
+	if !strings.Contains(lines[3], "▸") {
+		t.Errorf("row 1 (focused) = %q, want the cursor marker", lines[3])
+	}
+}
+
 func TestRawValueString_RawUnknownShowsBytes(t *testing.T) {
 	r := ddc.FeatureReading{
 		Readable: true, Current: 0x1f,

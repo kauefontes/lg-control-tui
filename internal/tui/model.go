@@ -347,14 +347,32 @@ type Model struct {
 	confirming       bool
 	confirmActionIdx int
 
-	// Raw VCP screen: a read-only view of every declared feature,
-	// including the unrecognized/manufacturer-specific ones the friendly
-	// screen never shows. Probed lazily, only when the user opens it.
-	screen     screenKind
-	raw        viewport.Model
-	rawReady   bool
-	rawLoading bool
-	rawErr     error
+	// Raw VCP screen: a view of every declared feature, including the
+	// unrecognized/manufacturer-specific ones the friendly screen never
+	// shows. Probed lazily, only when the user opens it.
+	screen      screenKind
+	raw         viewport.Model
+	rawReady    bool
+	rawLoading  bool
+	rawErr      error
+	rawReadings map[uint8]ddc.FeatureReading
+	rawCursor   int // index into m.caps.Features of the focused row
+
+	// Raw VCP editing: typing a new value for the row at rawCursor. Only
+	// entered via 'e'; the value isn't sent until rawConfirming passes.
+	rawEditing   bool
+	rawEditInput string
+	rawEditErr   string
+
+	// rawConfirming gates the actual write behind a y/n prompt — writing an
+	// arbitrary value to an unrecognized/manufacturer-specific code is
+	// undocumented behavior, per ddcutil's own --permit-unknown-feature
+	// caution, so this never fires silently.
+	rawConfirming   bool
+	rawConfirmValue int
+	rawWriting      bool
+	rawWriteErr     error
+
 	winW, winH int
 }
 
@@ -384,7 +402,27 @@ func (m Model) refresh() (Model, tea.Cmd) {
 	m.rawReady = false
 	m.rawLoading = false
 	m.rawErr = nil
+	m.rawReadings = nil
+	m.rawCursor = 0
+	m.rawEditing = false
+	m.rawEditInput = ""
+	m.rawEditErr = ""
+	m.rawConfirming = false
+	m.rawWriting = false
+	m.rawWriteErr = nil
 	return m, detectCmd
+}
+
+// refreshRawContent re-renders the raw table from the current readings and
+// cursor and pushes it into the viewport, keeping the focused row visible.
+func (m *Model) refreshRawContent() {
+	m.raw.SetContent(renderRawTable(m.caps, m.rawReadings, m.rawCursor))
+	line := m.rawCursor + rawTableHeaderLines
+	if line < m.raw.YOffset {
+		m.raw.SetYOffset(line)
+	} else if line >= m.raw.YOffset+m.raw.Height {
+		m.raw.SetYOffset(line - m.raw.Height + 1)
+	}
 }
 
 func (m Model) displayNum() int {
@@ -456,6 +494,57 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // swallow anything else while a destructive action is pending
 		}
 
+		if m.rawConfirming {
+			switch msg.String() {
+			case "y", "Y":
+				f := m.caps.Features[m.rawCursor]
+				m.rawConfirming = false
+				m.rawWriting = true
+				m.rawWriteErr = nil
+				return m, rawSetCmd(m.displayNum(), f.Code, m.rawConfirmValue, !f.Recognized)
+			case "n", "N", "esc":
+				m.rawConfirming = false
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			}
+			return m, nil // swallow anything else while a raw write is pending confirmation
+		}
+
+		if m.rawEditing {
+			switch msg.String() {
+			case "esc":
+				m.rawEditing = false
+				m.rawEditInput = ""
+				m.rawEditErr = ""
+			case "enter":
+				v, err := strconv.Atoi(m.rawEditInput)
+				switch {
+				case m.rawEditInput == "" || err != nil:
+					m.rawEditErr = "Enter a whole number."
+				case v < 0 || v > 65535:
+					m.rawEditErr = "Value must be between 0 and 65535."
+				default:
+					m.rawEditing = false
+					m.rawEditErr = ""
+					m.rawConfirming = true
+					m.rawConfirmValue = v
+				}
+			case "backspace":
+				if len(m.rawEditInput) > 0 {
+					m.rawEditInput = m.rawEditInput[:len(m.rawEditInput)-1]
+				}
+			case "ctrl+c":
+				return m, tea.Quit
+			default:
+				s := msg.String()
+				if len(s) == 1 && s[0] >= '0' && s[0] <= '9' && len(m.rawEditInput) < 5 {
+					m.rawEditInput += s
+					m.rawEditErr = ""
+				}
+			}
+			return m, nil // swallow anything else while entering a raw value
+		}
+
 		if m.screen == screenRaw {
 			switch msg.String() {
 			case "q", "ctrl+c":
@@ -467,6 +556,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if m.caps != nil {
 					m.rawLoading = true
 					return m, rawProbeCmd(m.displayNum(), allFeatureCodes(m.caps))
+				}
+				return m, nil
+			case "up", "k":
+				if m.caps != nil && len(m.caps.Features) > 0 {
+					m.rawCursor--
+					if m.rawCursor < 0 {
+						m.rawCursor = len(m.caps.Features) - 1
+					}
+					m.refreshRawContent()
+				}
+				return m, nil
+			case "down", "j":
+				if m.caps != nil && len(m.caps.Features) > 0 {
+					m.rawCursor = (m.rawCursor + 1) % len(m.caps.Features)
+					m.refreshRawContent()
+				}
+				return m, nil
+			case "e":
+				if m.caps != nil && len(m.caps.Features) > 0 && !m.rawLoading {
+					m.rawEditing = true
+					m.rawEditInput = ""
+					m.rawEditErr = ""
+					m.rawWriteErr = nil
 				}
 				return m, nil
 			}
@@ -612,8 +724,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.rawErr = msg.err
 		if msg.err == nil {
 			m.rawReady = true
-			m.raw.SetContent(renderRawTable(m.caps, readingsByCode(msg.readings)))
+			m.rawReadings = readingsByCode(msg.readings)
+			m.rawCursor = 0
+			m.refreshRawContent()
 			m.raw.GotoTop()
+		}
+
+	case rawSingleProbeMsg:
+		// Best-effort refresh of one row after a write — if the re-read
+		// itself fails, the row just keeps showing its last known value,
+		// same as the controls screen's liveValueMsg handling.
+		if msg.err == nil {
+			if m.rawReadings == nil {
+				m.rawReadings = map[uint8]ddc.FeatureReading{}
+			}
+			m.rawReadings[msg.code] = msg.reading
+			m.refreshRawContent()
+		}
+
+	case rawSetMsg:
+		m.rawWriting = false
+		m.rawWriteErr = msg.err
+		if msg.err == nil {
+			return m, rawSingleProbeCmd(m.displayNum(), msg.code)
 		}
 	}
 

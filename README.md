@@ -76,8 +76,16 @@ or just `go run .` during development.
 | `R` | Full rescan — drops the on-disk cache and rediscovers everything from scratch |
 | `q` / `ctrl+c` | Quit |
 
-Inside the Raw VCP screen: `↑↓`/`j`/`k` scroll, `f`/`pgdn` and `b`/`pgup`
-page, `r` rescans just that screen, `esc`/`v` goes back.
+Inside the Raw VCP screen: `↑↓`/`j`/`k` move the focused row, `f`/`pgdn` and
+`b`/`pgup` page, `e` edits the focused row's value, `r` rescans the whole
+screen, `esc`/`v` goes back.
+
+Editing a row types a new decimal value, then goes through a `y`/`n`
+confirmation before anything is sent — writing to a code `ddcutil` doesn't
+recognize (unrecognized/manufacturer-specific) additionally requires
+`--permit-unknown-feature`, which the confirmation prompt calls out
+explicitly since it's undocumented behavior on ddcutil's part, not this
+project's.
 
 ## How it works
 
@@ -208,10 +216,6 @@ hypothetical.
 
 ## What's deliberately not here yet
 
-- **Editing Raw VCP values.** The Raw VCP screen is read-only for now —
-  writing to an unrecognized/manufacturer-specific code needs its own
-  confirmation gate (per `ddcutil`'s own `--permit-unknown-feature`
-  caution) and a numeric-input control this project hasn't built yet.
 - **Multiple displays.** `ddcutil detect` can list more than one monitor;
   the app currently only ever drives `displays[0]`. The cache is already
   keyed by manufacturer+model so it's ready for this, but there's no
