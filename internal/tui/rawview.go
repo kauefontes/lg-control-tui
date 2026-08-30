@@ -16,6 +16,7 @@ type screenKind int
 const (
 	screenControls screenKind = iota
 	screenRaw
+	screenPicker
 )
 
 // rawTableHeaderLines is how many lines renderRawTable emits before the

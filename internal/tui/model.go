@@ -326,6 +326,15 @@ type Model struct {
 	displays []ddc.Display
 	err      error
 
+	// selected indexes m.displays for whichever one is currently being
+	// controlled. displayChosen stays false until either a single display
+	// was auto-picked or the picker screen (for more than one) has been
+	// answered — it's what keeps a later refresh from re-showing the
+	// picker and bouncing the user back to display 0.
+	selected      int
+	displayChosen bool
+	pickerCursor  int
+
 	probing  bool
 	caps     *ddc.Capabilities
 	probeErr error
@@ -426,10 +435,11 @@ func (m *Model) refreshRawContent() {
 }
 
 func (m Model) displayNum() int {
-	if len(m.displays) == 0 {
+	d, ok := m.currentDisplay()
+	if !ok {
 		return 0
 	}
-	return m.displays[0].Number
+	return d.Number
 }
 
 // adjust computes the command to move the focused slider/selector one step
@@ -545,6 +555,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil // swallow anything else while entering a raw value
 		}
 
+		if m.screen == screenPicker {
+			switch msg.String() {
+			case "q", "ctrl+c":
+				return m, tea.Quit
+			case "esc":
+				if m.displayChosen {
+					m.screen = screenControls
+				}
+				return m, nil
+			case "up", "k":
+				if len(m.displays) > 0 {
+					m.pickerCursor--
+					if m.pickerCursor < 0 {
+						m.pickerCursor = len(m.displays) - 1
+					}
+				}
+			case "down", "j":
+				if len(m.displays) > 0 {
+					m.pickerCursor = (m.pickerCursor + 1) % len(m.displays)
+				}
+			case "enter":
+				if len(m.displays) > 0 {
+					return m.selectDisplay(m.pickerCursor)
+				}
+			}
+			return m, nil
+		}
+
 		if m.screen == screenRaw {
 			switch msg.String() {
 			case "q", "ctrl+c":
@@ -595,11 +633,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "R":
 			// Full rescan: drop the cached shape and start over as if this
 			// were the first time we've seen this monitor.
-			if len(m.displays) > 0 {
-				d := m.displays[0]
+			if d, ok := m.currentDisplay(); ok {
 				_ = ddc.ClearMonitorCache(d.MfgID, d.Model)
 			}
 			return m.refresh()
+		case "D":
+			if len(m.displays) > 1 {
+				m.screen = screenPicker
+				m.pickerCursor = m.selected
+			}
+			return m, nil
 		case "v":
 			m.screen = screenRaw
 			if !m.rawReady && !m.rawLoading && m.caps != nil {
@@ -640,10 +683,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.loading = false
 		m.displays = msg.displays
 		m.err = msg.err
-		if m.err == nil && len(m.displays) > 0 {
-			m.probing = true
-			return m, probeCmd(m.displays[0])
+		if m.err != nil || len(m.displays) == 0 {
+			break
 		}
+		if !m.displayChosen && len(m.displays) > 1 {
+			// More than one display and nothing chosen yet (first launch,
+			// or the previously-selected one vanished on refresh) — ask
+			// instead of silently guessing which one the user wants.
+			m.screen = screenPicker
+			m.pickerCursor = 0
+			break
+		}
+		if m.selected >= len(m.displays) {
+			m.selected = 0
+		}
+		m.displayChosen = true
+		m.probing = true
+		return m, probeCmd(m.displays[m.selected])
 
 	case probeMsg:
 		m.probing = false
@@ -756,6 +812,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) View() string {
 	title := titleStyle.Render("LG CONTROL TUI")
 
+	if m.screen == screenPicker {
+		return m.pickerView(title)
+	}
+
 	if m.screen == screenRaw {
 		return m.rawView(title)
 	}
@@ -773,8 +833,17 @@ func (m Model) View() string {
 	case len(m.displays) == 0:
 		body = errStyle.Render("No DDC/CI capable displays found.")
 	default:
-		for _, d := range m.displays {
-			line := okStyle.Render("● ") + d.MfgID
+		multi := len(m.displays) > 1
+		for i, d := range m.displays {
+			prefix := ""
+			if multi {
+				if i == m.selected {
+					prefix = "▸ "
+				} else {
+					prefix = "  "
+				}
+			}
+			line := prefix + okStyle.Render("● ") + d.MfgID
 			if d.Model != "" {
 				line += " " + d.Model
 			}
@@ -825,7 +894,12 @@ func (m Model) View() string {
 		}
 	}
 
-	help := dimStyle.Render("↑↓ navigate · ←→ adjust · enter run action · v raw VCP · r refresh · R rescan · q quit")
+	helpText := "↑↓ navigate · ←→ adjust · enter run action · v raw VCP · r refresh · R rescan"
+	if len(m.displays) > 1 {
+		helpText += " · D switch display"
+	}
+	helpText += " · q quit"
+	help := dimStyle.Render(helpText)
 
 	content := title + "\n\n" + body + "\n\n" + help
 	return boxStyle.Render(content)

@@ -74,6 +74,7 @@ or just `go run .` during development.
 | `v` | Toggle the Raw VCP screen |
 | `r` | Refresh (re-detect + re-read current values) |
 | `R` | Full rescan — drops the on-disk cache and rediscovers everything from scratch |
+| `D` | Switch which display is being controlled (only shown/active with more than one detected) |
 | `q` / `ctrl+c` | Quit |
 
 Inside the Raw VCP screen: `↑↓`/`j`/`k` move the focused row, `f`/`pgdn` and
@@ -86,6 +87,18 @@ recognize (unrecognized/manufacturer-specific) additionally requires
 `--permit-unknown-feature`, which the confirmation prompt calls out
 explicitly since it's undocumented behavior on ddcutil's part, not this
 project's.
+
+### Multiple displays
+
+If `ddcutil detect` finds more than one DDC/CI-capable display, a picker
+screen appears before the controls screen — pick one with `↑↓`/`enter`.
+With exactly one display, the picker is skipped entirely and behavior is
+unchanged from before. Press `D` from the controls screen at any point to
+reopen the picker and switch to a different display (each display has its
+own on-disk cache, keyed by manufacturer+model, so switching back and
+forth doesn't re-scan a display you've already controlled). `r`/`R`
+refreshes stay on whichever display was last picked instead of bouncing
+back to the picker.
 
 ## How it works
 
@@ -189,7 +202,8 @@ lg-control-tui/
     │
     └── tui/
         ├── model.go          # Bubble Tea Model/Update/View, controls screen
-        ├── rawview.go        # Raw VCP screen (bubbles/viewport)
+        ├── picker.go         # multi-display picker screen
+        ├── rawview.go        # Raw VCP screen (bubbles/viewport) + value editing
         ├── styles.go         # Lip Gloss styles
         └── components/
             ├── slider.go     # continuous control
@@ -216,10 +230,6 @@ hypothetical.
 
 ## What's deliberately not here yet
 
-- **Multiple displays.** `ddcutil detect` can list more than one monitor;
-  the app currently only ever drives `displays[0]`. The cache is already
-  keyed by manufacturer+model so it's ready for this, but there's no
-  picker screen yet.
 - **Other monitors/vendors.** Nothing here is LG-specific — the whole
   point of the generic `VCPFeature` model is that it doesn't need to be —
   but it's only been exercised against one panel so far.

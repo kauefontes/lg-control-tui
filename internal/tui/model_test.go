@@ -446,6 +446,142 @@ func TestUpdate_LiveValueMsg_Error_KeepsCachedValueButClearsPending(t *testing.T
 	}
 }
 
+func TestUpdate_DetectMsg_SingleDisplay_AutoSelectsAndProbes(t *testing.T) {
+	m := New()
+
+	next, cmd := m.Update(detectMsg{displays: []ddc.Display{{Number: 0, MfgID: "GSM"}}})
+	got := next.(Model)
+
+	if got.screen == screenPicker {
+		t.Error("a single display must never show the picker")
+	}
+	if !got.displayChosen {
+		t.Error("expected displayChosen=true after auto-selecting the only display")
+	}
+	if cmd == nil {
+		t.Fatal("expected a probeCmd to be issued for the auto-selected display")
+	}
+}
+
+func TestUpdate_DetectMsg_MultipleDisplays_ShowsPickerWithoutProbing(t *testing.T) {
+	m := New()
+
+	next, cmd := m.Update(detectMsg{displays: []ddc.Display{
+		{Number: 0, MfgID: "GSM"},
+		{Number: 1, MfgID: "DEL"},
+	}})
+	got := next.(Model)
+
+	if got.screen != screenPicker {
+		t.Fatal("expected screenPicker when more than one display is found and none chosen yet")
+	}
+	if got.displayChosen {
+		t.Error("displayChosen must stay false until the picker is answered")
+	}
+	if cmd != nil {
+		t.Error("expected no probeCmd before a display is picked")
+	}
+}
+
+func TestUpdate_DetectMsg_AlreadyChosen_SkipsPickerOnRefresh(t *testing.T) {
+	// Simulates pressing 'r' after already picking display 1: a refresh
+	// re-detects but must not bounce the user back into the picker or back
+	// to display 0.
+	m := New()
+	m.displayChosen = true
+	m.selected = 1
+
+	next, cmd := m.Update(detectMsg{displays: []ddc.Display{
+		{Number: 0, MfgID: "GSM"},
+		{Number: 1, MfgID: "DEL"},
+	}})
+	got := next.(Model)
+
+	if got.screen == screenPicker {
+		t.Error("a previously-chosen display must not re-trigger the picker on refresh")
+	}
+	if got.selected != 1 {
+		t.Errorf("selected = %d, want 1 (previous choice preserved)", got.selected)
+	}
+	if cmd == nil {
+		t.Fatal("expected a probeCmd for the already-chosen display")
+	}
+}
+
+func TestUpdate_Picker_EnterSelectsAndStartsProbe(t *testing.T) {
+	m := New()
+	m.screen = screenPicker
+	m.displays = []ddc.Display{{Number: 0, MfgID: "GSM"}, {Number: 1, MfgID: "DEL"}}
+	m.pickerCursor = 1
+
+	next, cmd := m.Update(keyMsg("enter"))
+	got := next.(Model)
+
+	if got.screen != screenControls {
+		t.Error("expected screen to switch to screenControls after picking")
+	}
+	if got.selected != 1 {
+		t.Errorf("selected = %d, want 1", got.selected)
+	}
+	if !got.displayChosen {
+		t.Error("expected displayChosen=true after picking")
+	}
+	if cmd == nil {
+		t.Fatal("expected a probeCmd for the picked display")
+	}
+}
+
+func TestUpdate_Picker_UpDownMovesCursorAndWraps(t *testing.T) {
+	m := New()
+	m.screen = screenPicker
+	m.displays = []ddc.Display{{Number: 0}, {Number: 1}, {Number: 2}}
+
+	next, _ := m.Update(keyMsg("k")) // up from 0 wraps to last
+	got := next.(Model)
+	if got.pickerCursor != 2 {
+		t.Errorf("pickerCursor = %d, want wrap to 2", got.pickerCursor)
+	}
+
+	next, _ = got.Update(keyMsg("j")) // down from last wraps to 0
+	got = next.(Model)
+	if got.pickerCursor != 0 {
+		t.Errorf("pickerCursor = %d, want wrap to 0", got.pickerCursor)
+	}
+}
+
+func TestUpdate_ControlsScreen_DKeySwitchesToPickerWhenMultipleDisplays(t *testing.T) {
+	m := New()
+	m.displays = []ddc.Display{{Number: 0}, {Number: 1}}
+	m.selected = 1
+	m.displayChosen = true
+
+	next, _ := m.Update(keyMsg("D"))
+	got := next.(Model)
+
+	if got.screen != screenPicker {
+		t.Fatal("expected 'D' to open the picker when more than one display exists")
+	}
+	if got.pickerCursor != 1 {
+		t.Errorf("pickerCursor = %d, want to start on the currently selected display (1)", got.pickerCursor)
+	}
+}
+
+func TestUpdate_ControlsScreen_DKeyIsNoopWithSingleDisplay(t *testing.T) {
+	m := New()
+	m.displays = []ddc.Display{{Number: 0}}
+	m.displayChosen = true
+
+	next, cmd := m.Update(keyMsg("D"))
+	got := next.(Model)
+
+	if got.screen == screenPicker {
+		t.Error("'D' must be a no-op with only one display")
+	}
+	if cmd != nil {
+		t.Error("expected no command from 'D' with a single display")
+	}
+}
+
 func rawScreenModelWithTwoFeatures() Model {
 	m := New()
 	m.screen = screenRaw
