@@ -22,4 +22,7 @@ var (
 	okStyle  = lipgloss.NewStyle().Foreground(okColor)
 	errStyle = lipgloss.NewStyle().Foreground(errColor)
 	dimStyle = lipgloss.NewStyle().Foreground(dim)
+
+	// rawFocusedStyle highlights the focused row on the Raw VCP screen.
+	rawFocusedStyle = lipgloss.NewStyle().Bold(true).Foreground(accent)
 )
